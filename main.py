@@ -18,6 +18,7 @@ from typing import List, Set, Dict, Optional
 
 import cloudscraper
 from bs4 import BeautifulSoup
+from urllib.parse import quote_plus
 from requests.exceptions import RequestException
 
 # ==========================================
@@ -41,7 +42,8 @@ if ENV_PATH.exists():
         logger.info("Loaded environment from .env")
     except Exception:
         logger.info("python-dotenv not installed or failed to load .env")
-BASE_URL = "https://www.seek.com.au"
+# Allow overriding the Seek base URL (use NZ site by default for Auckland searches)
+BASE_URL = os.environ.get("SEEK_BASE_URL", "https://www.seek.co.nz")
 STATE_FILE = os.path.join(BASE_DIR, "data", "seen_jobs.json")
 MAX_RETRIES = 5
 RETRY_DELAY = 5  # base delay in seconds (will use exponential backoff)
@@ -61,8 +63,33 @@ else:
         # Exit with non-zero code so CI indicates misconfiguration
         sys.exit(1)
 
-SEARCH_KEYWORDS = os.environ.get("SEARCH_KEYWORDS", "Python Developer").split(",")
-SEARCH_LOCATION = os.environ.get("SEARCH_LOCATION", "All Australia")
+# Default to Manual Testing roles in Auckland. Can be overridden with env vars.
+# Include common manual/QA role name variants; user can override with SEARCH_KEYWORDS env var.
+SEARCH_KEYWORDS = os.environ.get(
+    "SEARCH_KEYWORDS",
+    "Manual Testing,Manual Tester,Manual QA,QA Tester,QA Analyst,Quality Analyst,Quality Assurance Tester,Test Analyst,Functional Tester,Regression Tester,Test Engineer (Manual),Manual QA Engineer"
+).split(",")
+SEARCH_LOCATION = os.environ.get("SEARCH_LOCATION", "Auckland")
+
+# Exclude automation-related roles by keywords (can be overridden via env)
+EXCLUDE_AUTOMATION_KEYWORDS = [
+    k.strip().lower()
+    for k in os.environ.get(
+        "EXCLUDE_AUTOMATION_KEYWORDS",
+        "automation,automated,selenium,cucumber,playwright,robotframework,webdriver,pytest,protractor,qa automation,automation engineer,automation tester"
+    ).split(",")
+    if k.strip()
+]
+
+
+def looks_automated(job: Dict) -> bool:
+    """Return True if job title or advertiser suggests an automation role."""
+    title = (job.get('title') or '').lower()
+    advertiser = (job.get('advertiser') or '').lower()
+    for kw in EXCLUDE_AUTOMATION_KEYWORDS:
+        if kw in title or kw in advertiser:
+            return True
+    return False
 
 
 class SeekScraper:
@@ -80,6 +107,29 @@ class SeekScraper:
             # Fallback to default create_scraper
             self.scraper = cloudscraper.create_scraper()
 
+        # Strengthen headers to look like a modern desktop Chrome browser.
+        try:
+            self.scraper.headers.update({
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+                              'AppleWebKit/537.36 (KHTML, like Gecko) '
+                              'Chrome/120.0.0.0 Safari/537.36',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+                'Accept-Language': 'en-NZ,en;q=0.9,en-US;q=0.8',
+                'Referer': BASE_URL,
+                'Connection': 'keep-alive',
+                'Upgrade-Insecure-Requests': '1',
+                'Sec-Fetch-Site': 'same-origin',
+                'Sec-Fetch-Mode': 'navigate',
+                'Sec-Fetch-User': '?1',
+                'Sec-Fetch-Dest': 'document',
+                'Sec-CH-UA': '"Chromium";v="120", "Google Chrome";v="120", "Not A(Brand";v="24"',
+                'Sec-CH-UA-Mobile': '?0',
+                'Sec-CH-UA-Platform': '"Windows"'
+            })
+        except Exception:
+            # If headers can't be set, proceed silently — cloudscraper will still attempt.
+            pass
+
         self.proxies = self._get_proxies()
 
     def _get_proxies(self) -> Optional[Dict[str, str]]:
@@ -89,26 +139,29 @@ class SeekScraper:
         return None
 
     def search(self, keyword: str, location: str) -> List[Dict]:
-        k_slug = re.sub(r"\s+", "-", keyword.strip())
-        l_slug = re.sub(r"\s+", "-", location.strip())
-        url = f"{BASE_URL}/{k_slug}-jobs/in-{l_slug}"
+        # Use query-style search which is more stable across Seek domains
+        # Build a query-parameter based URL to reliably target the correct site
+        # and location (helps avoid redirects between AU/NZ domains).
+        query = f"keywords={quote_plus(keyword)}&location={quote_plus(location)}"
+        url = f"{BASE_URL}/jobs?{query}"
 
         logger.info(f"Requesting: {url}")
 
         for attempt in range(1, MAX_RETRIES + 1):
             try:
                 resp = self.scraper.get(url, proxies=self.proxies, timeout=30)
+                # Save the latest response body to disk for debugging (truncated)
+                try:
+                    with open(LAST_RESPONSE_FILE, 'w', encoding='utf-8') as f:
+                        f.write(resp.text[:200000])
+                    logger.debug(f"Saved last response to {LAST_RESPONSE_FILE} (status {resp.status_code})")
+                except Exception as e:
+                    logger.debug(f"Failed to save last response: {e}")
+
                 if resp.status_code == 200:
                     return self._parse_response(resp.text)
                 elif resp.status_code in (403, 429):
                     logger.warning(f"Received {resp.status_code}. Attempt {attempt}/{MAX_RETRIES}")
-                    # Save body for offline inspection
-                    try:
-                        with open(LAST_RESPONSE_FILE, 'w', encoding='utf-8') as f:
-                            f.write(resp.text[:200000])
-                        logger.info(f"Saved last response to {LAST_RESPONSE_FILE}")
-                    except Exception as e:
-                        logger.debug(f"Failed to save last response: {e}")
                     # exponential backoff
                     time.sleep(RETRY_DELAY * (2 ** (attempt - 1)))
                     continue
@@ -184,25 +237,98 @@ class SeekScraper:
             except Exception as e:
                 logger.debug(f"Redux parsing fallback: {e}")
 
-        # Fallback: DOM parsing using job-card articles
-        articles = soup.find_all('article', attrs={'data-automation': 'job-card'})
-        logger.info(f"Falling back to DOM parsing. Cards found: {len(articles)}")
-        for card in articles:
+        # Fallback: DOM parsing. Seek pages may render job cards in various forms.
+        # Strategy:
+        #  - Find <article> job cards when present
+        #  - Also consider any anchor linking to /job/<id> as a job entry
+        #  - Extract id from data attributes or from the job link href
+        candidates = []
+
+        # collect article-based cards
+        for a in soup.find_all('article'):
+            candidates.append(a)
+
+        # also collect any anchor that looks like a job link
+        for a in soup.find_all('a', href=True):
+            if re.search(r'/job/\d+', a['href']):
+                # prefer the surrounding article if present, otherwise the anchor
+                parent_article = a.find_parent('article')
+                if parent_article is not None:
+                    candidates.append(parent_article)
+                else:
+                    candidates.append(a)
+
+        # de-duplicate candidate elements (by object id)
+        unique_candidates = []
+        seen_objs = set()
+        for el in candidates:
+            oid = id(el)
+            if oid in seen_objs:
+                continue
+            seen_objs.add(oid)
+            unique_candidates.append(el)
+
+        logger.info(f"Falling back to DOM parsing. Candidate nodes: {len(unique_candidates)}")
+
+        for node in unique_candidates:
             try:
-                title_tag = card.find('a', attrs={'data-automation': 'jobTitle'})
-                job_id = card.get('data-job-id') or card.get('data-automation-id')
-                if not title_tag or not job_id:
+                # Find a job link inside the node (or node itself if it's an <a>)
+                link = None
+                if node.name == 'a' and node.get('href'):
+                    link = node
+                else:
+                    link = node.find('a', href=re.compile(r'/job/\d+'))
+
+                job_id = None
+                if link and link.get('href'):
+                    m = re.search(r'/job/(\d+)', link['href'])
+                    if m:
+                        job_id = m.group(1)
+
+                # fallback to data attributes
+                if not job_id and getattr(node, 'get', None):
+                    job_id = node.get('data-job-id') or node.get('data-automation-id')
+
+                if not job_id:
+                    # nothing we can do reliably
                     continue
-                advertiser_tag = card.find('a', attrs={'data-automation': 'jobCompany'})
-                location_tag = card.find('a', attrs={'data-automation': 'jobLocation'})
+
+                # Title: prefer the link text, then common heading tags, then aria-label
+                title_text = None
+                if link and link.get_text(strip=True):
+                    title_text = link.get_text(strip=True)
+                else:
+                    h = node.find(['h1', 'h2', 'h3', 'h4'])
+                    if h and h.get_text(strip=True):
+                        title_text = h.get_text(strip=True)
+                    else:
+                        title_text = node.get('aria-label') or 'Unknown'
+
+                # Advertiser/company: common selectors and attributes
+                advertiser_tag = (
+                    node.find(attrs={'data-automation': 'jobCompany'})
+                    or node.find(class_=re.compile(r'company|employer', re.I))
+                    or node.find('a', href=re.compile(r'/company|/employer'))
+                )
+
+                # Location: common selectors
+                location_tag = (
+                    node.find(attrs={'data-automation': 'jobLocation'})
+                    or node.find(class_=re.compile(r'location', re.I))
+                )
+
+                # Salary/date: optional
+                salary_tag = node.find(class_=re.compile(r'salary|package|remuneration', re.I))
+                date_tag = node.find('time') or node.find(class_=re.compile(r'date|posted', re.I))
+
                 jobs.append({
                     'id': str(job_id),
-                    'title': title_tag.get_text(strip=True),
+                    'title': title_text,
                     'advertiser': advertiser_tag.get_text(strip=True) if advertiser_tag else 'Unknown',
                     'location': location_tag.get_text(strip=True) if location_tag else 'Unknown',
-                    'salary': 'N/A',
-                    'url': f"{BASE_URL}/job/{job_id}",
-                    'listingDate': 'Unknown'
+                    'salary': salary_tag.get_text(strip=True) if salary_tag else 'N/A',
+                    'url': (BASE_URL + link['href']) if link and link.get('href') and link['href'].startswith('/') else f"{BASE_URL}/job/{job_id}",
+                    'listingDate': date_tag.get_text(strip=True) if date_tag else 'Unknown'
                 })
             except Exception:
                 continue

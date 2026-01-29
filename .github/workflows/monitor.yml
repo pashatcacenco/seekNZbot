@@ -31,8 +31,8 @@ jobs:
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          SEARCH_KEYWORDS: ${{ vars.SEARCH_KEYWORDS || 'Python Developer,DevOps Engineer' }}
-          SEARCH_LOCATION: ${{ vars.SEARCH_LOCATION || 'All Australia' }}
+          SEARCH_KEYWORDS: ${{ vars.SEARCH_KEYWORDS || 'Manual Testing,Quality Analyst' }}
+          SEARCH_LOCATION: ${{ vars.SEARCH_LOCATION || 'Auckland' }}
           PROXY_URL: ${{ secrets.PROXY_URL }}
         run: |
           python main.py
