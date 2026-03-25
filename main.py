@@ -67,7 +67,7 @@ else:
 # Include common manual/QA role name variants; user can override with SEARCH_KEYWORDS env var.
 SEARCH_KEYWORDS = os.environ.get(
     "SEARCH_KEYWORDS",
-    "Manual Testing,Manual Tester,Manual QA,QA Tester,QA Analyst,Quality Analyst,Quality Assurance Tester,Test Analyst,Functional Tester,Regression Tester,Test Engineer (Manual),Manual QA Engineer"
+    "Manual Testing,Manual Tester,Manual QA,QA Tester,QA Analyst,Quality Analyst,Quality Assurance Tester,Test Analyst,Functional Tester,Data Entry, Regression Tester,Test Engineer (Manual),Manual QA Engineer"
 ).split(",")
 SEARCH_LOCATION = os.environ.get("SEARCH_LOCATION", "Auckland")
 
