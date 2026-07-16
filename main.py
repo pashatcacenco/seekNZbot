@@ -378,7 +378,9 @@ class TelegramNotifier:
         self.chat_id = chat_id
         self.api_url = f"https://api.telegram.org/bot{token}/sendMessage"
 
-    def send_job(self, job: Dict):
+    def send_job(self, job: Dict) -> bool:
+        """Send a job notification. Returns True only if Telegram actually accepted it,
+        so callers can avoid marking a job as seen when delivery failed."""
         text = (
             f"🔥 <b>New Opportunity Found!</b>\n\n"
             f"💼 <b>{job.get('title')}</b>\n"
@@ -398,17 +400,33 @@ class TelegramNotifier:
 
         if DRY_RUN:
             logger.info(f"DRY_RUN: would send message for job {job.get('id')}: {job.get('title')}")
-            return
+            return True
 
-        try:
-            import requests
-            r = requests.post(self.api_url, data=payload, timeout=10)
-            if r.status_code != 200:
-                logger.error(f"Telegram API error: {r.status_code} {r.text}")
-            # small throttle
-            time.sleep(0.4)
-        except Exception as e:
-            logger.error(f"Failed to send Telegram message: {e}")
+        import requests
+        for attempt in range(1, 4):
+            try:
+                r = requests.post(self.api_url, data=payload, timeout=10)
+                if r.status_code == 200:
+                    time.sleep(1.2)  # stay under Telegram's per-chat rate limit
+                    return True
+                elif r.status_code == 429:
+                    retry_after = 5
+                    try:
+                        retry_after = r.json().get('parameters', {}).get('retry_after', 5)
+                    except Exception:
+                        pass
+                    logger.warning(f"Telegram rate limited, retrying in {retry_after}s (attempt {attempt}/3)")
+                    time.sleep(retry_after + 1)
+                    continue
+                else:
+                    logger.error(f"Telegram API error: {r.status_code} {r.text}")
+                    return False
+            except Exception as e:
+                logger.error(f"Failed to send Telegram message: {e}")
+                return False
+
+        logger.error(f"Giving up on job {job.get('id')} after repeated Telegram rate limits")
+        return False
 
 
 def load_state() -> Set[str]:
@@ -470,9 +488,11 @@ def main():
                 continue
 
             logger.info(f"New job: {jid} - {job.get('title')}")
-            notifier.send_job(job)
-            seen_jobs.add(jid)
-            new_count += 1
+            if notifier.send_job(job):
+                seen_jobs.add(jid)
+                new_count += 1
+            else:
+                logger.warning(f"Delivery failed for job {jid}; will retry next run")
 
     if new_count:
         save_state(seen_jobs)
