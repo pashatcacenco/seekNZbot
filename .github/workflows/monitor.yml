@@ -31,7 +31,7 @@ jobs:
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          SEARCH_KEYWORDS: ${{ vars.SEARCH_KEYWORDS || 'Manual Testing,Quality Analyst' }}
+          SEARCH_KEYWORDS: ${{ vars.SEARCH_KEYWORDS || 'Manual Testing,Manual Tester,Manual QA,QA Tester,QA Analyst,Quality Analyst,Quality Assurance Tester,Test Analyst,Functional Tester,Data Entry,Regression Tester,Test Engineer (Manual),Manual QA Engineer,Automation Tester,Automation Testing,QA Automation Engineer,Test Automation Engineer,Automation QA,QA Engineer (Automation),SDET (Software Development Engineer in Test),Automation Test Analyst,Functional Automation Tester,Regression Automation Tester,Playwright,Cypress,Appium,API Testing,CI/CD,Cucumber,BDD' }}
           SEARCH_LOCATION: ${{ vars.SEARCH_LOCATION || 'Auckland' }}
           PROXY_URL: ${{ secrets.PROXY_URL }}
         run: |
