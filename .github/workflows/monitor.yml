@@ -34,6 +34,7 @@ jobs:
           SEARCH_KEYWORDS: ${{ vars.SEARCH_KEYWORDS || 'Manual Testing,Manual Tester,Manual QA,QA Tester,QA Analyst,Quality Analyst,Quality Assurance Tester,Test Analyst,Functional Tester,Data Entry,Regression Tester,Test Engineer (Manual),Manual QA Engineer,Automation Tester,Automation Testing,QA Automation Engineer,Test Automation Engineer,Automation QA,QA Engineer (Automation),SDET (Software Development Engineer in Test),Automation Test Analyst,Functional Automation Tester,Regression Automation Tester,Playwright,Cypress,Appium,API Testing,CI/CD,Cucumber,BDD' }}
           SEARCH_LOCATION: ${{ vars.SEARCH_LOCATION || 'Auckland' }}
           PROXY_URL: ${{ secrets.PROXY_URL }}
+          RUN_SOURCE: github
         run: |
           python main.py
       - name: Upload diagnostic response
@@ -47,5 +48,5 @@ jobs:
         uses: stefanzweifel/git-auto-commit-action@v5
         with:
           commit_message: '🤖 Update job state [skip ci]'
-          file_pattern: data/seen_jobs.json
+          file_pattern: 'data/seen_jobs.json data/last_run.json'
           branch: ${{ github.ref_name }}

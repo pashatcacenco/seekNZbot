@@ -14,6 +14,7 @@ import logging
 import random
 import sys
 import re
+from datetime import datetime, timezone
 from typing import List, Set, Dict, Optional
 
 import cloudscraper
@@ -48,6 +49,12 @@ STATE_FILE = os.path.join(BASE_DIR, "data", "seen_jobs.json")
 MAX_RETRIES = 5
 RETRY_DELAY = 5  # base delay in seconds (will use exponential backoff)
 LAST_RESPONSE_FILE = os.path.join(BASE_DIR, 'last_response.html')
+
+# Heartbeat: lets the GitHub Actions run skip itself when the local machine
+# (which runs from a non-blocklisted residential IP) has run recently.
+HEARTBEAT_FILE = os.path.join(BASE_DIR, "data", "last_run.json")
+RUN_SOURCE = os.environ.get("RUN_SOURCE", "github")
+LOCAL_ACTIVE_THRESHOLD_MINUTES = float(os.environ.get("LOCAL_ACTIVE_THRESHOLD_MINUTES", "75"))
 
 # Environment / secrets
 # DRY_RUN allows running without Telegram credentials for testing/parsing
@@ -93,6 +100,32 @@ def matches_location(job: Dict, desired_location: str) -> bool:
         if token in job_loc:
             return True
     return False
+
+
+def should_skip_for_local_run() -> bool:
+    """On GitHub Actions, skip the run if the local machine (residential IP,
+    not blocklisted by Cloudflare) has run recently and is presumably covering it."""
+    if RUN_SOURCE != "github" or not os.path.exists(HEARTBEAT_FILE):
+        return False
+    try:
+        with open(HEARTBEAT_FILE, 'r', encoding='utf-8') as f:
+            heartbeat = json.load(f)
+        if heartbeat.get('source') != 'local':
+            return False
+        last_run = datetime.fromisoformat(heartbeat['last_run_utc'])
+        age_minutes = (datetime.now(timezone.utc) - last_run).total_seconds() / 60
+        return age_minutes < LOCAL_ACTIVE_THRESHOLD_MINUTES
+    except Exception:
+        return False
+
+
+def write_heartbeat():
+    os.makedirs(os.path.dirname(HEARTBEAT_FILE), exist_ok=True)
+    with open(HEARTBEAT_FILE, 'w', encoding='utf-8') as f:
+        json.dump({
+            "last_run_utc": datetime.now(timezone.utc).isoformat(),
+            "source": RUN_SOURCE
+        }, f, indent=2)
 
 
 class SeekScraper:
@@ -399,6 +432,11 @@ def save_state(seen_ids: Set[str]):
 
 def main():
     logger.info("Starting Seek monitor...")
+
+    if should_skip_for_local_run():
+        logger.info("Local machine ran recently — skipping this GitHub Actions run.")
+        return
+
     scraper = SeekScraper()
     notifier = TelegramNotifier(TELEGRAM_TOKEN, TELEGRAM_CHAT_ID)
 
@@ -443,6 +481,8 @@ def main():
         logger.info("No new jobs found")
     if skipped_not_location:
         logger.info(f"Skipped {skipped_not_location} jobs due to location filter (not {SEARCH_LOCATION})")
+
+    write_heartbeat()
 
 
 if __name__ == '__main__':
